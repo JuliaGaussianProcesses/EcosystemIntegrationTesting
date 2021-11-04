@@ -21,8 +21,9 @@ x_tr = range(-10.0, 10.0; length=N_tr);
 θ_init = (
     gp = (
         σ² = positive(1.0),
-        l = positive(1.0),
+        l = positive(3.0),
     ),
+    α = positive(1.0),
     qu = (
         z = fixed(x_tr),
         m = zeros(N_tr),
@@ -34,7 +35,7 @@ x_tr = range(-10.0, 10.0; length=N_tr);
 # Specify functions to build LatentGP.
 build_gp(θ) = GP(θ.σ² * with_lengthscale(SEKernel(), θ.l))
 
-build_latent_gp(θ) = LatentGP(build_gp(θ.gp), BernoulliLikelihood(), θ.jitter)
+build_latent_gp(θ) = LatentGP(build_gp(θ.gp), GammaLikelihood(θ.α), θ.jitter)
 
 # Generate synthetic data.
 
@@ -42,7 +43,7 @@ build_latent_gp(θ) = LatentGP(build_gp(θ.gp), BernoulliLikelihood(), θ.jitter
 
 function build_svgp(θ)
     lf = build_latent_gp(θ)
-    q = MvNormal(θ.qu.m, θ.qu.C)
+    q = MvNormal(θ.qu.m, θ.qu.C + 1e-9I)
     fz = lf(θ.qu.z).fx
     return SVGP(fz, q), lf
 end
@@ -58,78 +59,35 @@ end
 
 # L-BFGS parameters chosen because they seems to work well empirically.
 # You could also try with the defaults.
-result = optimize(
+optimisation_result = optimize(
     loss ∘ unflatten,
     θ -> only(Zygote.gradient(loss ∘ unflatten, θ)),
-    θ_flat_init,
+    θ_flat_init + randn(length(θ_flat_init)),
     LBFGS(;
         alphaguess=Optim.LineSearches.InitialStatic(; scaled=true),
         linesearch=Optim.LineSearches.BackTracking(),
     ),
-    Optim.Options(; iterations=100);
+    Optim.Options(; iterations=1_000);
     inplace=false,
-)
+);
+θ_opt = unflatten(optimisation_result.minimizer);
 
+# 
+x_pr = range(-15.0, 15.0; length=250);
+svgp_opt, lf_opt = build_svgp(θ_opt);
 
+# Abstract these lines? Would be nice to write
+# lf_post_opt = posterior(lf_opt, svgp_opt)
+# or something.
+post_opt = posterior(svgp_opt);
+lf_post_opt = LatentGP(post_opt, lf_opt.lik, lf_opt.Σy);
 
+f = [rand(lf_post_opt(x_pr)).f for _ in 1:20];
+p = map(_f -> lf_opt.lik.invlink.(_f), f);
 
-# function build_SVGP(params::NamedTuple)
-#     kernel = params.k.var * (SqExponentialKernel() ∘ ScaleTransform(params.k.precision))
-#     f = LatentGP(GP(kernel), lik, jitter)
-#     q = MvNormal(params.m, params.A)
-#     fz = f(params.z).fx
-#     return SVGP(fz, q), f
-# end
-
-# function loss(params::NamedTuple)
-#     svgp, f = build_SVGP(params)
-#     fx = f(x)
-#     return -elbo(svgp, fx, y)
-# end;
-
-
-
-
-
-
-# # Do optimisations
-# new_parameters = ...
-
-# # fixed some components and optimise further
-
-# compute_objective ∘ unflatten
-
-
-
-
-
-
-
-
-
-
-
-
-
-# x_plot = range(-13.0, 13.0; length=250)
-
-# Xgrid = -4:0.1:29  # for visualization
-# X = range(0, 23.5; length=48)  # training inputs
-# f(x) = 3 * sin(10 + 0.6x) + sin(0.1x) - 1  # latent function
-# fs = f.(X)  # latent function values at training inputs
-
-# lik = BernoulliLikelihood()  # has logistic invlink by default
-# # could use other invlink, e.g. normcdf(f) = cdf(Normal(), f)
-
-# invlink = lik.invlink  # logistic function
-# ps = invlink.(fs)  # probabilities at the training inputs
-# Y = [rand(Bernoulli(p)) for p in ps]  # observations at the training inputs
-# # could do this in one call as `Y = rand(lik(fs))`
-
-# function plot_data()
-#     plot(; xlims=extrema(Xgrid), xticks=0:6:24)
-#     plot!(Xgrid, invlink ∘ f; label="true probabilities")
-#     return scatter!(X, Y; label="observations", color=3)
-# end
-
-# plot_data()
+let
+    plt = plot()
+    plot!(plt, x_pr, p; color=:blue, linealpha=0.2, label="")
+    plot!(plt, x_pr, mean(p); color=:blue, linalpha=0.5, linewidth=2, label="")
+    scatter!(plt, x_tr, y_tr; color=:red, label="")
+end
