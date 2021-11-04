@@ -28,6 +28,12 @@ begin
 	Random.seed!(1);
 end
 
+# ╔═╡ 2ae96bcb-ac3d-4d2a-a3cb-4e404c86204f
+using FastGaussQuadrature
+
+# ╔═╡ b12002c5-9fd0-440d-9aa5-bb1ff57215fc
+using Kronecker
+
 # ╔═╡ 7941e4a9-11bf-48dc-a4d5-9e9c45359dfe
 using Profile
 
@@ -98,14 +104,51 @@ build_latent_gp(θ) = LatentGP(build_gp(θ.gp), build_lik(θ), θ.jitter)
 function build_svgp(θ)
     lf = build_latent_gp(θ)
     fz = lf(θ.qu.z).fx
+	
+	# hacky version of whitening:
 	K = cov(fz)
 	# L = cholesky(Hermitian(K, :L)).L
 	L = cholesky(Symmetric(K, :L)).L
 	S = AbstractGPs._symmetric(L * θ.qu.C * L')
 	m = L * θ.qu.m
+	
 	q = MvNormal(m, S)
     return SVGP(fz, q), lf
 end
+
+# ╔═╡ 81451124-e1f8-4ca1-8a06-742e2d06026f
+let
+	xs, ws = gausshermite(3)
+	kron(ws, ws') ≈ (f -> f[1]*f[2]).(collect(Iterators.product(ws, ws)))
+end
+
+# ╔═╡ 3ab8f3ad-3cb8-44fa-8f4e-1274166b5eb4
+function expected_loglik_2d(y, q_f::MvNormal, lik; n_points=31)
+	L = cholesky(cov(q_f)).L
+	m = mean(q_f)
+	D = length(m)
+	xs, ws = gausshermite(n_points)
+	ws_ = ws / √π
+	@assert D == 2
+	weight_tensor = kron(ws, ws')
+	fs = (x -> m + √2 * L * collect(x)).(Iterators.product(fill(xs, D)...))
+	lls = loglikelihood.(lik.(fs), y)
+	return mapreduce(*, +, weight_tensor, lls)
+end
+
+# ╔═╡ c1c39373-16b1-48fa-a692-b668e999e85a
+expected_loglik_2d(1.3, MvNormal([0.1, 0.3], [1. 0.3; 0.3 0.9]), f -> Normal(f[1], exp(f[2])))
+
+# ╔═╡ 389176f9-822a-4aa3-b9d6-f43bd0d38a91
+typeof((; lik2d=Any))
+
+# ╔═╡ b9340b85-0856-4f17-8202-a507a4c58b40
+function ApproximateGPs.expected_loglik(
+    gh::GaussHermite, y::AbstractVector, q_f::AbstractVector{<:MvNormal}, lik::NamedTuple{(:lik2d,)}
+)
+	return sum(expected_loglik_2d.(y, q_f, lik.lik2d; n_points=gh.n_points))
+end
+
 
 # ╔═╡ ac552b51-c35c-462f-b55d-cbc03984ab90
 last_param_value, unflatten = ParameterHandling.value_flatten(θ_init)
@@ -217,7 +260,9 @@ ApproximateGPs = "298c2ebc-0411-48ad-af38-99e88101b606"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+FastGaussQuadrature = "442a2c76-b920-505d-bb47-c5924d526838"
 FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"
+Kronecker = "2c470bb0-bcc8-11e8-3dad-c9649493f05e"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 PDMats = "90014a1f-27ba-587c-ab20-58faa44d9150"
@@ -233,7 +278,9 @@ ApproximateGPs = "~0.1.2"
 CSV = "~0.9.10"
 DataFrames = "~1.2.2"
 Distributions = "~0.25.24"
+FastGaussQuadrature = "~0.4.7"
 FillArrays = "~0.12.7"
+Kronecker = "~0.5.1"
 Optim = "~1.5.0"
 PDMats = "~0.11.3"
 ParameterHandling = "~0.4.0"
@@ -371,6 +418,12 @@ deps = ["StaticArrays"]
 git-tree-sha1 = "9f02045d934dc030edad45944ea80dbd1f0ebea7"
 uuid = "d38c429a-6771-53c6-b99e-75d170b6e991"
 version = "0.5.7"
+
+[[CovarianceEstimation]]
+deps = ["LinearAlgebra", "Statistics", "StatsBase"]
+git-tree-sha1 = "bc3930158d2be029e90b7c40d1371c4f54fa04db"
+uuid = "587fd27a-f159-11e8-2dae-1979310e6154"
+version = "0.2.6"
 
 [[Crayons]]
 git-tree-sha1 = "3f71217b538d7aaee0b69ab47d9b7724ca8afa0d"
@@ -703,6 +756,12 @@ git-tree-sha1 = "9c3d38dafc02feae68a4747813b8b0205fd03da5"
 uuid = "ec8451be-7e33-11e9-00cf-bbf324bd1392"
 version = "0.10.26"
 
+[[Kronecker]]
+deps = ["LinearAlgebra", "NamedDims", "SparseArrays", "StatsBase"]
+git-tree-sha1 = "a51f46415c844dee694cb8b20a3fcbe6dba342c2"
+uuid = "2c470bb0-bcc8-11e8-3dad-c9649493f05e"
+version = "0.5.1"
+
 [[LAME_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "f6250b16881adf048549549fba48b1161acdac8c"
@@ -859,6 +918,12 @@ version = "7.8.2"
 git-tree-sha1 = "bfe47e760d60b82b66b61d2d44128b62e3a369fb"
 uuid = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
 version = "0.3.5"
+
+[[NamedDims]]
+deps = ["AbstractFFTs", "ChainRulesCore", "CovarianceEstimation", "LinearAlgebra", "Pkg", "Requires", "Statistics"]
+git-tree-sha1 = "1bb9558fad77d915edd65ef84772a6cd91214346"
+uuid = "356022a1-0364-5f58-8944-0da4b18d706f"
+version = "0.2.41"
 
 [[NetworkOptions]]
 uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
@@ -1450,6 +1515,13 @@ version = "0.9.1+5"
 # ╠═ab887844-6248-4f58-8664-5591d9407fc4
 # ╠═617559cb-9675-49a4-9516-5ed232a084e2
 # ╠═ecc074b6-4d2a-4ece-a310-cd74a6e235bb
+# ╠═2ae96bcb-ac3d-4d2a-a3cb-4e404c86204f
+# ╠═81451124-e1f8-4ca1-8a06-742e2d06026f
+# ╠═3ab8f3ad-3cb8-44fa-8f4e-1274166b5eb4
+# ╠═c1c39373-16b1-48fa-a692-b668e999e85a
+# ╠═b12002c5-9fd0-440d-9aa5-bb1ff57215fc
+# ╠═389176f9-822a-4aa3-b9d6-f43bd0d38a91
+# ╠═b9340b85-0856-4f17-8202-a507a4c58b40
 # ╠═ac552b51-c35c-462f-b55d-cbc03984ab90
 # ╠═264ef0a5-3eef-41dc-ad96-8f836bc05a25
 # ╠═a1854d54-e2ab-4ca4-ad8b-cc34236a65b8
