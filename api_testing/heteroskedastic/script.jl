@@ -98,6 +98,9 @@ end
 # ╔═╡ a1854d54-e2ab-4ca4-ad8b-cc34236a65b8
 ParameterHandling.value(unflatten(last_param_value))
 
+# ╔═╡ 556c7e7e-caac-4d93-98b6-67be2a3745a7
+
+
 # ╔═╡ 256f04e6-00d9-4dee-92f6-5d37d8f1ebfa
 function optimize_loss(loss, θ_init; iterations=1_000)
     # L-BFGS parameters chosen because they seems to work well empirically.
@@ -1393,6 +1396,7 @@ version = "0.9.1+5"
 # ╠═ac552b51-c35c-462f-b55d-cbc03984ab90
 # ╠═264ef0a5-3eef-41dc-ad96-8f836bc05a25
 # ╠═a1854d54-e2ab-4ca4-ad8b-cc34236a65b8
+# ╠═556c7e7e-caac-4d93-98b6-67be2a3745a7
 # ╠═256f04e6-00d9-4dee-92f6-5d37d8f1ebfa
 # ╠═afaf21f5-f687-470c-a00a-3c5cfb691d30
 # ╠═03cda98c-b70a-4ab9-a838-ec2142e54ea0
