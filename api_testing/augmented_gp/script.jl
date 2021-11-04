@@ -1,7 +1,7 @@
-# Largely copied from the Single Non-Gaussian
+# Largely copied from Ti's example in ApproximateGPs.
+using Pkg
+Pkg.activate(@__DIR__)
 using ApproximateGPs
-using AbstractGPs
-using GPLikelihoods
 using LinearAlgebra
 using Distributions
 using FillArrays
@@ -13,21 +13,20 @@ using Plots
 default(; legend=:outertopright, size=(700, 400))
 
 using Random
-Random.seed!(42);
+Random.seed!(1);
 
 # Specify parameters.
 N_tr = 50;
-x_tr = range(-10.0, 10.0; length=N_tr);
+x_tr = collect(range(-10.0, 10.0; length=N_tr));
 θ_init = (
     gp = (
         σ² = positive(1.0),
         l = positive(3.0),
     ),
-    α = positive(1.0),
     qu = (
-        z = fixed(x_tr),
-        m = zeros(N_tr),
-        C = positive_definite(Matrix(Eye(N_tr))),
+        z = x_tr,
+        m = fixed(zeros(N_tr)),
+        C = fixed(Matrix(Eye(N_tr))),
     ),
     jitter = fixed(1e-6),
 );
@@ -35,11 +34,15 @@ x_tr = range(-10.0, 10.0; length=N_tr);
 # Specify functions to build LatentGP.
 build_gp(θ) = GP(θ.σ² * with_lengthscale(SEKernel(), θ.l))
 
-build_latent_gp(θ) = LatentGP(build_gp(θ.gp), GammaLikelihood(θ.α), θ.jitter)
+build_latent_gp(θ) = LatentGP(build_gp(θ.gp), BernoulliLikelihood(), θ.jitter)
 
 # Generate synthetic data.
 
 (f_tr, y_tr) = rand(build_latent_gp(ParameterHandling.value(θ_init))(x_tr));
+
+u, lf = build_svgp(ParameterHandling.value(θ_init))
+
+# SVGP : Approximate posterior at f(z)
 
 function build_svgp(θ)
     lf = build_latent_gp(θ)
@@ -48,9 +51,34 @@ function build_svgp(θ)
     return SVGP(fz, q), lf
 end
 
+function margin_to_expec(ps::AbstractVector{<:Normal})
+    sqrt.(abs2.(mean.(ps)) .+ var.(ps))
+end
+
+function aug_optimize(u::SVGP, x_tr, y_tr; niter=3)
+    K = ApproximateGPs._chol_cov(u.fz)
+    q = u.q
+    y = sign.(y_tr .- 0.5)
+    θ = zeros(length(y_tr))
+    for _ in 1:niter
+        pf = marginals(posterior(u)(x_tr))
+        @show c = margin_to_expec(pf)
+        @. θ = tanh(c / 2) / (2c)
+        Σ = Symmetric(inv(inv(K) + Diagonal(θ)))
+        μ = Σ \ (y / 2 - K \ mean(u.fz))
+        q = MvNormal(μ, Σ)
+        u = SVGP(u.fz, q)
+    end
+    return u
+end
+
+u = aug_optimize(u, x_tr, y_tr)
+
+
 function loss(θ)
-    svgp, f = build_svgp(θ)
+    augsvgp, f = build_svgp(θ)
     fx = f(x_tr)
+    svgp = Zygote.@ignore optimize(augsvgp, fx, y_tr)
     return -elbo(svgp, fx, y_tr)
 end
 
