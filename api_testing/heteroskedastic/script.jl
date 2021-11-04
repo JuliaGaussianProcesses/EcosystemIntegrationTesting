@@ -17,6 +17,7 @@ begin
 	using CSV
 	using DataFrames
 	using PlutoUI
+	using PDMats
 end
 
 # ╔═╡ cb2bc8c2-aec5-4d90-97e6-d3d1cf7bdbf8
@@ -27,22 +28,32 @@ begin
 	Random.seed!(1);
 end
 
+# ╔═╡ 7941e4a9-11bf-48dc-a4d5-9e9c45359dfe
+using Profile
+
 # ╔═╡ 4a80e4bc-b55a-4e36-a529-4a1f6255d30e
 df = CSV.read("motor.csv", DataFrame);
 
 # ╔═╡ cf7118e3-38f9-42fe-88b2-bb74db8b3f72
 scatter(df.times, df.accel)
 
+# ╔═╡ c82af105-9c80-456e-ad06-2643a8f1cd12
+function stdnorm(x)
+	(x .- mean(x)) ./ std(x)
+end
+
 # ╔═╡ 08da3a05-e3e7-4bc7-91d7-8f8418f157a9
 begin
-    x_tr = df.times
+    x_tr = stdnorm(df.times)
 	N_tr = length(x_tr)
-	y_tr = df.accel
+	y_tr = stdnorm(df.accel)
+
+	scatter(x_tr, y_tr)
 end
 
 # ╔═╡ a5ce8d93-1adb-4152-80c9-37f01f71b767
 md"""
-To dos:
+# To dos:
 - value(fixed(positive(1.0))) should be 1.0 - apply recursively?
 """
 
@@ -51,11 +62,14 @@ begin
 	# Specify parameters.
 	θ_init = (
 	    gp = (
-	        σ² = fixed(10.0), #positive(10.0),
-	        l = fixed(8.0), #positive(8.0),
+	        σ² = #fixed(10.0), #
+			positive(1.0),
+	        l = #fixed(8.0), #
+			positive(0.5),
 	    ),
 	    lik = (
-			noise_var = fixed(1.0), #positive(1.0),
+			noise_var = #fixed(1.0), #
+			positive(0.1),
 		),
 	    qu = (
 	        z = fixed(x_tr),
@@ -65,6 +79,9 @@ begin
 	    jitter = fixed(1e-6),
 	);
 end
+
+# ╔═╡ fdbcac49-13ed-4308-b10c-8a6bafe8a9bc
+N_tr
 
 # ╔═╡ 9d680498-2f63-4965-8451-a71fbad2c75f
 # Specify functions to build LatentGP.
@@ -80,13 +97,18 @@ build_latent_gp(θ) = LatentGP(build_gp(θ.gp), build_lik(θ), θ.jitter)
 # ╔═╡ ecc074b6-4d2a-4ece-a310-cd74a6e235bb
 function build_svgp(θ)
     lf = build_latent_gp(θ)
-    q = MvNormal(θ.qu.m, θ.qu.C + 1e-9I)
     fz = lf(θ.qu.z).fx
+	K = cov(fz)
+	# L = cholesky(Hermitian(K, :L)).L
+	L = cholesky(Symmetric(K, :L)).L
+	S = AbstractGPs._symmetric(L * θ.qu.C * L')
+	m = L * θ.qu.m
+	q = MvNormal(m, S)
     return SVGP(fz, q), lf
 end
 
 # ╔═╡ ac552b51-c35c-462f-b55d-cbc03984ab90
-last_param_value, unflatten = ParameterHandling.flatten(θ_init)
+last_param_value, unflatten = ParameterHandling.value_flatten(θ_init)
 
 # ╔═╡ 264ef0a5-3eef-41dc-ad96-8f836bc05a25
 function loss(θ)
@@ -96,10 +118,19 @@ function loss(θ)
 end
 
 # ╔═╡ a1854d54-e2ab-4ca4-ad8b-cc34236a65b8
-ParameterHandling.value(unflatten(last_param_value))
+unflatten(last_param_value)
 
-# ╔═╡ 556c7e7e-caac-4d93-98b6-67be2a3745a7
+# ╔═╡ 8e4892a2-f69d-444a-8baf-2616acb04ee5
+loss(unflatten(last_param_value))
 
+# ╔═╡ 9d136a1d-2fee-4b49-ad0a-4325206f93c3
+Zygote.gradient(loss ∘ unflatten, last_param_value)
+
+# ╔═╡ 8a231e9b-0811-41ab-ad73-91f0cb9f0b84
+val, grad = Zygote.withgradient(loss ∘ ParameterHandling.value ∘ unflatten, last_param_value)
+
+# ╔═╡ 557e3da6-3628-488f-8568-629562feb118
+only(grad)
 
 # ╔═╡ 256f04e6-00d9-4dee-92f6-5d37d8f1ebfa
 function optimize_loss(loss, θ_init; iterations=1_000)
@@ -112,31 +143,41 @@ function optimize_loss(loss, θ_init; iterations=1_000)
 	options = Optim.Options(; iterations, show_trace=true)
 
     θ_flat_init, unflatten = ParameterHandling.value_flatten(θ_init);
+	loss_packed = loss ∘ unflatten 
 
-	function grad(θ)
-		try
-			return only(Zygote.gradient(loss ∘ unflatten, θ))
-		catch
-			last_param_value .= θ
-		end
+	# https://julianlsolvers.github.io/Optim.jl/stable/#user/tipsandtricks/#avoid-repeating-computations
+	function fg!(F, G, x)
+	    if F != nothing && G != nothing
+			val, grad = Zygote.withgradient(loss_packed, x)
+			G .= only(grad)
+			return val
+		elseif G != nothing
+			grad = Zygote.gradient(loss_packed, x)
+			G .= only(grad)
+		elseif F != nothing
+	    	return loss_packed(x)
+	  	end
 	end
 
-	with_terminal() do
-	    result = optimize(
-	        loss ∘ unflatten,
-	        grad,
-	        θ_flat_init,
-			options;
-	        inplace=false,
-	    )
-	
-	    @show result
-	end
-    return unflatten(result.minimizer)
+	result = optimize(
+		Optim.only_fg!(fg!),
+		θ_flat_init,
+		optimizer,
+		options;
+		inplace=false,
+	)
+
+    return unflatten(result.minimizer), result
 end
 
 # ╔═╡ afaf21f5-f687-470c-a00a-3c5cfb691d30
-θ_opt = optimize_loss(loss, θ_init)
+begin
+	θ_opt, optim_result = optimize_loss(loss, θ_init)
+	optim_result
+end
+
+# ╔═╡ 8b73d2b2-a959-4675-b094-46d4081946e9
+θ_opt.lik
 
 # ╔═╡ 03cda98c-b70a-4ab9-a838-ec2142e54ea0
 begin
@@ -152,7 +193,14 @@ lf_post_opt = LatentGP(post_opt, lf_opt.lik, lf_opt.Σy);
 end
 
 # ╔═╡ 9144c4c1-acf7-4ffd-ab37-42d6b817fd54
+fx = post_opt(-5:.01:5)
 
+# ╔═╡ a5a23afb-f47a-44c3-96c3-eb512a94b24b
+let
+	plot()
+	plot!(fx)
+	scatter!(x_tr, y_tr)
+end
 
 # ╔═╡ 6aa726bc-71d9-44e2-9381-f48245f8a034
 let
@@ -172,9 +220,11 @@ Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+PDMats = "90014a1f-27ba-587c-ab20-58faa44d9150"
 ParameterHandling = "2412ca09-6db7-441c-8e3a-88d5709968c5"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
@@ -185,6 +235,7 @@ DataFrames = "~1.2.2"
 Distributions = "~0.25.24"
 FillArrays = "~0.12.7"
 Optim = "~1.5.0"
+PDMats = "~0.11.3"
 ParameterHandling = "~0.4.0"
 Plots = "~1.23.5"
 PlutoUI = "~0.7.18"
@@ -943,6 +994,10 @@ version = "1.2.3"
 deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 
+[[Profile]]
+deps = ["Printf"]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+
 [[Qt5Base_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Fontconfig_jll", "Glib_jll", "JLLWrappers", "Libdl", "Libglvnd_jll", "OpenSSL_jll", "Pkg", "Xorg_libXext_jll", "Xorg_libxcb_jll", "Xorg_xcb_util_image_jll", "Xorg_xcb_util_keysyms_jll", "Xorg_xcb_util_renderutil_jll", "Xorg_xcb_util_wm_jll", "Zlib_jll", "xkbcommon_jll"]
 git-tree-sha1 = "ad368663a5e20dbb8d6dc2fddeefe4dae0781ae8"
@@ -1386,9 +1441,11 @@ version = "0.9.1+5"
 # ╠═cb2bc8c2-aec5-4d90-97e6-d3d1cf7bdbf8
 # ╠═4a80e4bc-b55a-4e36-a529-4a1f6255d30e
 # ╠═cf7118e3-38f9-42fe-88b2-bb74db8b3f72
+# ╠═c82af105-9c80-456e-ad06-2643a8f1cd12
 # ╠═08da3a05-e3e7-4bc7-91d7-8f8418f157a9
 # ╠═a5ce8d93-1adb-4152-80c9-37f01f71b767
 # ╠═26bfe821-7a7e-4ebc-8db3-678c59d7149e
+# ╠═fdbcac49-13ed-4308-b10c-8a6bafe8a9bc
 # ╠═9d680498-2f63-4965-8451-a71fbad2c75f
 # ╠═ab887844-6248-4f58-8664-5591d9407fc4
 # ╠═617559cb-9675-49a4-9516-5ed232a084e2
@@ -1396,11 +1453,17 @@ version = "0.9.1+5"
 # ╠═ac552b51-c35c-462f-b55d-cbc03984ab90
 # ╠═264ef0a5-3eef-41dc-ad96-8f836bc05a25
 # ╠═a1854d54-e2ab-4ca4-ad8b-cc34236a65b8
-# ╠═556c7e7e-caac-4d93-98b6-67be2a3745a7
+# ╠═7941e4a9-11bf-48dc-a4d5-9e9c45359dfe
+# ╠═8e4892a2-f69d-444a-8baf-2616acb04ee5
+# ╠═9d136a1d-2fee-4b49-ad0a-4325206f93c3
+# ╠═8a231e9b-0811-41ab-ad73-91f0cb9f0b84
+# ╠═557e3da6-3628-488f-8568-629562feb118
 # ╠═256f04e6-00d9-4dee-92f6-5d37d8f1ebfa
 # ╠═afaf21f5-f687-470c-a00a-3c5cfb691d30
+# ╠═8b73d2b2-a959-4675-b094-46d4081946e9
 # ╠═03cda98c-b70a-4ab9-a838-ec2142e54ea0
 # ╠═9144c4c1-acf7-4ffd-ab37-42d6b817fd54
+# ╠═a5a23afb-f47a-44c3-96c3-eb512a94b24b
 # ╠═6aa726bc-71d9-44e2-9381-f48245f8a034
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
