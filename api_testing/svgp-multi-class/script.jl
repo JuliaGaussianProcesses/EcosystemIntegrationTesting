@@ -67,7 +67,10 @@ q = MvNormal(zeros(M * C), Matrix{Float64}(I, M * C, M * C))
 
 svgp = SVGP(fz, q)
 
-
 post = posterior(svgp)  # Appears to work
 
-elbo(svgp, lgp_fx, vec(y); quadrature=MonteCarlo())  # TODO: broken
+
+# TODO: This is broken because we need to know the number or classes (in general
+# the input dims for the likelihood) to compute the `expected_loglik`.
+# Should this be defined in LatentGP or the Likelihood?
+elbo(svgp, lgp_fx, vec(y); quadrature=MonteCarlo())
