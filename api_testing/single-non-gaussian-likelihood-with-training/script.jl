@@ -4,7 +4,6 @@ using ApproximateGPs
 using LinearAlgebra
 using Distributions
 using FillArrays
-using LogExpFunctions: logistic, softplus, invsoftplus
 using Optim
 using ParameterHandling
 using Zygote
