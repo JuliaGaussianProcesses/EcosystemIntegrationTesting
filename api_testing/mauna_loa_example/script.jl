@@ -43,15 +43,15 @@ plotdata()
 	    σ = positive(exp(4.0)),
 	    ℓ = positive(exp(4.0)),
     ),
-	# per = (;
-	# 	σ = positive(exp(0.0)),
-	#     ℓ = positive(exp(1.0)),
-	# 	p = positive(exp(0.0)),
-	# ),
-	# se2 = (;
-	#     σ = positive(exp(4.0)),
-	#     ℓ = positive(exp(0.0)),
-	# ),
+	per = (;
+		σ = positive(exp(0.0)),
+	    ℓ = positive(exp(1.0)),
+		p = positive(exp(0.0)),
+	),
+	se2 = (;
+	    σ = positive(exp(4.0)),
+	    ℓ = positive(exp(0.0)),
+	),
 	rq = (;
 		σ = positive(exp(0.0)),
 	    ℓ = positive(exp(0.0)),
@@ -67,15 +67,16 @@ plotdata()
 # ╔═╡ b473f817-5899-454d-b1c2-c3f4afbca658
 begin
 	SE(θ) = θ.σ^2 * with_lengthscale(SqExponentialKernel(), θ.ℓ)
-	Per(θ) = θ.σ^2 * with_lengthscale(PeriodicKernel(; r=[θ.ℓ/2]), θ.p)  # NOTE- discrepancy with GaussianProcesses.jl
+	# PeriodicKernel is broken, see https://github.com/JuliaGaussianProcesses/KernelFunctions.jl/issues/389
+	#Per(θ) = θ.σ^2 * with_lengthscale(PeriodicKernel(; r=[θ.ℓ/2]), θ.p)  # NOTE- discrepancy with GaussianProcesses.jl
+	Per(θ) = θ.σ^2 * with_lengthscale(SqExponentialKernel(), θ.ℓ) ∘ PeriodicTransform(1/θ.p)
 	RQ(θ) = θ.σ^2 * with_lengthscale(RationalQuadraticKernel(; α=θ.α), θ.ℓ)
 end
 
 # ╔═╡ 4f206e15-8e5f-401d-a5a1-093aafac048c
 function build_gp_prior(θ)
 	# Kernel is represented as a sum of kernels
-	#kernel = SE(θ.se1) + Per(θ.per) * SE(θ.se2) + RQ(θ.rq) + SE(θ.se3)
-	kernel = SE(θ.se1) + SE(θ.se3)
+	kernel = SE(θ.se1) + Per(θ.per) * SE(θ.se2) + RQ(θ.rq) + SE(θ.se3)
 	return GP(kernel)
 end
 
@@ -116,6 +117,9 @@ begin
 	result
 end
 
+# ╔═╡ e4f8d74e-a36a-40aa-badd-1521dc2ec151
+result.minimum
+
 # ╔═╡ a26d5985-9f80-4509-a912-ccec00c0920c
 fpost_opt = build_posterior_gp(ParameterHandling.value(θ_opt))
 
@@ -124,6 +128,9 @@ let
 	plotdata()
 	plot!(fpost_opt(1900:0.2:2050))
 end
+
+# ╔═╡ b8fe5d20-7095-45c4-97df-3465aad163b2
+fpost_opt.prior.kernel
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -1299,7 +1306,9 @@ version = "0.9.1+5"
 # ╠═a1db1da5-13a9-45ce-98db-c36d9bf0b5d4
 # ╠═741a9954-9976-44e4-8103-25d93ea85846
 # ╠═8a8410e6-99c0-4e43-b307-2c332cbbbb8f
+# ╠═e4f8d74e-a36a-40aa-badd-1521dc2ec151
 # ╠═a26d5985-9f80-4509-a912-ccec00c0920c
 # ╠═cb841aeb-1dcd-4e82-998c-3e08cd730c0e
+# ╠═b8fe5d20-7095-45c4-97df-3465aad163b2
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
