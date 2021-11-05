@@ -9,7 +9,7 @@ function optimize_loss(loss, θ_init; iterations=1_000)
     )
 	options = Optim.Options(; iterations, show_trace=true)
 
-    θ_flat_init, unflatten = ParameterHandling.value_flatten(θ_init);
+    θ_flat_init, unflatten = ParameterHandling.value_flatten(θ_init)
 	loss_packed = loss ∘ unflatten 
 
 	# https://julianlsolvers.github.io/Optim.jl/stable/#user/tipsandtricks/#avoid-repeating-computations
@@ -21,6 +21,7 @@ function optimize_loss(loss, θ_init; iterations=1_000)
 		elseif G != nothing
 			grad = Zygote.gradient(loss_packed, x)
 			G .= only(grad)
+            return nothing
 		elseif F != nothing
 	    	return loss_packed(x)
 	  	end
