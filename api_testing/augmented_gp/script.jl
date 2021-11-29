@@ -8,25 +8,29 @@ using FillArrays
 using Optim
 using ParameterHandling
 using Zygote
-
+using ChainRulesCore
+using PDMats
 using Plots
 default(; legend=:outertopright, size=(700, 400))
 include("polyagamma.jl")
 using Random
 Random.seed!(1);
+ChainRulesCore.@opt_out ChainRulesCore.rrule(::Type{<:Matrix}, ::PDMats.PDMat)
 
 # Specify parameters.
 N_tr = 200;
 x_tr = collect(range(-10.0, 10.0; length=N_tr));
+N_z = 50
+z = collect(range(-10.0, 10.0; length=N_z))
 θ_init = (
     gp = (
         σ² = positive(1.0),
         l = positive(3.0),
     ),
     qu = (
-        z = x_tr,
-        m = fixed(zeros(N_tr)),
-        C = fixed(Matrix(Eye(N_tr))),
+        z = z,
+        m = fixed(zeros(N_z)),
+        C = fixed(Matrix(Eye(N_z))),
     ),
     jitter = fixed(1e-6),
 );
@@ -58,6 +62,7 @@ end
 
 function aug_optimize(u::SparseVariationalApproximation, x_tr, y_tr; niter=3)
     K = ApproximateGPs._chol_cov(u.fz)
+    κ = K \ cov(u.fz.f, u.fz.x, x_tr)
     μ = mean(u.q)
     Σ = cov(u.q)
     y_sign = sign.(y_tr .- 0.5)
@@ -65,11 +70,14 @@ function aug_optimize(u::SparseVariationalApproximation, x_tr, y_tr; niter=3)
     for _ in 1:niter
         pf = marginals(posterior(u)(x_tr))
         marginals_to_aug_posterior!(qω, pf)
-        Σ = Symmetric(inv(inv(K) + Diagonal(mean.(qω))))
-        μ = Σ * (y_sign / 2 - K \ mean(u.fz))
+        Σ = Symmetric(inv(inv(K) + project(Diagonal(mean.(qω)), κ)))
+        μ = Σ * (project(y_sign / 2, κ) - K \ mean(u.fz))
     end
     return μ, Σ, qω
 end
+
+project(x::AbstractVector, κ) = κ * x
+project(x::AbstractMatrix, κ) = κ * x * κ'
 
 u, lf = build_svgp(ParameterHandling.value(θ_init))
 
@@ -100,6 +108,7 @@ function _aug_elbo(sva, fx, y, lik, aug_variables, num_data)
     n_batch = length(y)
     scale = num_data / n_batch
     return sum(variational_exp) * scale - Zygote.@ignore(kl_term(lik, aug_variables)) - ApproximateGPs.kl_term(sva, post)
+    # return -ApproximateGPs.kl_term(sva, post)
 end
 
 function kl_term(::BernoulliLikelihood{<:LogisticLink}, aug_variables::AbstractVector{<:PolyaGamma})
@@ -117,7 +126,7 @@ end
 
 function _expected_aug_loglik(::BernoulliLikelihood{<:LogisticLink}, qf, qω, y)
     m = mean(qf)
-    return  m / 2 - (abs2(m) + var(qf)) * mean(qω) / 2 -log(2)
+    return  m / 2 - (abs2(m) + var(qf)) * mean(qω) / 2 - log(2)
 end
 
 function loss(θ)
@@ -182,4 +191,25 @@ unew = SparseVariationalApproximation(Centered(), u.fz, MvNormal(m, S))
 ##
 scatter(x_tr, y_tr, label="data", alpha=0.5)
 plot!(x_tr, f_tr, label="")
-plot!(posterior(unew)(x_tr))
+plot!(posterior(unew)(x_tr), label="Prediction on f")
+scatter!(posterior(unew)(z), label="Inducing Points")
+
+
+
+## Comparison With AGP.jl
+
+using AugmentedGaussianProcesses
+
+kernel_init = build_gp(ParameterHandling.value(θ_init.gp)).kernel
+agp = AGP.SVGP(kernel_init, LogisticLikelihood(), AnalyticVI(), z; verbose=3)
+
+train!(agp, x_tr, y_tr, 1000)
+
+μ, sig = AGP.predict_f(agp, x_tr; cov=true)
+
+kernel_init
+agp[1].prior.kernel
+kernel_opt = build_gp(ParameterHandling.value(θ_opt.gp)).kernel
+
+
+plot!(x_tr, μ)
