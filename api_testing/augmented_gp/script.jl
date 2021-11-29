@@ -11,12 +11,12 @@ using Zygote
 
 using Plots
 default(; legend=:outertopright, size=(700, 400))
-
+include("polyagamma.jl")
 using Random
 Random.seed!(1);
 
 # Specify parameters.
-N_tr = 50;
+N_tr = 200;
 x_tr = collect(range(-10.0, 10.0; length=N_tr));
 θ_init = (
     gp = (
@@ -40,57 +40,108 @@ build_latent_gp(θ) = LatentGP(build_gp(θ.gp), BernoulliLikelihood(), θ.jitter
 
 (f_tr, y_tr) = rand(build_latent_gp(ParameterHandling.value(θ_init))(x_tr));
 
-u, lf = build_svgp(ParameterHandling.value(θ_init))
-
 # SVGP : Approximate posterior at f(z)
 
 function build_svgp(θ)
     lf = build_latent_gp(θ)
+    Zygote.@show lf.f.kernel
     q = MvNormal(θ.qu.m, θ.qu.C + 1e-9I)
     fz = lf(θ.qu.z).fx
-    return SVGP(fz, q), lf
+    return SparseVariationalApproximation(Centered(), fz, q), lf
 end
 
-function margin_to_expec(ps::AbstractVector{<:Normal})
-    sqrt.(abs2.(mean.(ps)) .+ var.(ps))
+function marginals_to_aug_posterior!(qω::AbstractVector, ps::AbstractVector{<:Normal})
+    map!(qω, ps) do p
+        PolyaGamma(1, sqrt(abs2(mean(p)) + var(p)))
+    end
 end
 
-function aug_optimize(u::SVGP, x_tr, y_tr; niter=3)
+function aug_optimize(u::SparseVariationalApproximation, x_tr, y_tr; niter=3)
     K = ApproximateGPs._chol_cov(u.fz)
-    q = u.q
-    y = sign.(y_tr .- 0.5)
-    θ = zeros(length(y_tr))
+    μ = mean(u.q)
+    Σ = cov(u.q)
+    y_sign = sign.(y_tr .- 0.5)
+    qω = Vector{PolyaGamma{Int,Float64}}(undef, length(y_tr))
     for _ in 1:niter
         pf = marginals(posterior(u)(x_tr))
-        @show c = margin_to_expec(pf)
-        @. θ = tanh(c / 2) / (2c)
-        Σ = Symmetric(inv(inv(K) + Diagonal(θ)))
-        μ = Σ \ (y / 2 - K \ mean(u.fz))
-        q = MvNormal(μ, Σ)
-        u = SVGP(u.fz, q)
+        marginals_to_aug_posterior!(qω, pf)
+        Σ = Symmetric(inv(inv(K) + Diagonal(mean.(qω))))
+        μ = Σ * (y_sign / 2 - K \ mean(u.fz))
     end
-    return u
+    return μ, Σ, qω
 end
 
-u = aug_optimize(u, x_tr, y_tr)
+u, lf = build_svgp(ParameterHandling.value(θ_init))
 
+m, S, qω = aug_optimize(u, x_tr, y_tr)
+unew = SparseVariationalApproximation(Centered(), u.fz, MvNormal(m, S))
+##
+scatter(x_tr, y_tr, label="data", alpha=0.5)
+plot!(x_tr, f_tr, label="")
+plot!(posterior(unew)(x_tr))
+##
+function aug_elbo(
+    sva::SparseVariationalApproximation,
+    lfx::AbstractGPs.LatentFiniteGP,
+    y::AbstractVector,
+    aug_variables;
+    num_data=length(y),
+)
+    @assert sva.fz.f === lfx.fx.f
+    return _aug_elbo(sva, lfx.fx, y, lfx.lik, aug_variables, num_data)
+end
+
+function _aug_elbo(sva, fx, y, lik, aug_variables, num_data)
+    @assert sva.fz.f === fx.f
+    post = posterior(sva)
+    q_f = marginals(post(fx.x))
+    variational_exp = expected_aug_loglik(y, q_f, lik, aug_variables)
+
+    n_batch = length(y)
+    scale = num_data / n_batch
+    return sum(variational_exp) * scale - Zygote.@ignore(kl_term(lik, aug_variables)) - ApproximateGPs.kl_term(sva, post)
+end
+
+function kl_term(::BernoulliLikelihood{<:LogisticLink}, aug_variables::AbstractVector{<:PolyaGamma})
+    sum(aug_variables) do qω
+        c = qω.c
+        - abs2(c) * mean(qω) + 2log(cosh(c / 2))
+    end
+end
+
+function expected_aug_loglik(y, q_f, lik, aug_variables)
+    return map(y, q_f, aug_variables) do y, q, aug
+        _expected_aug_loglik(lik, q, aug, y)
+    end
+end
+
+function _expected_aug_loglik(::BernoulliLikelihood{<:LogisticLink}, qf, qω, y)
+    m = mean(qf)
+    return  m / 2 - (abs2(m) + var(qf)) * mean(qω) / 2 -log(2)
+end
 
 function loss(θ)
-    augsvgp, f = build_svgp(θ)
+    svgp, f = build_svgp(θ)
     fx = f(x_tr)
-    svgp = Zygote.@ignore optimize(augsvgp, fx, y_tr)
-    return -elbo(svgp, fx, y_tr)
+    μ, Σ, qω = Zygote.@ignore aug_optimize(svgp, x_tr, y_tr)
+    augsvgp = SparseVariationalApproximation(Centered(), svgp.fz, MvNormal(μ, Σ))
+    return -aug_elbo(augsvgp, fx, y_tr, qω)
 end
 
 # Optimise everything.
 θ_flat_init, unflatten = ParameterHandling.value_flatten(θ_init);
+unflatten(θ_flat_init)
+
+(loss ∘ unflatten)(θ_flat_init)
+
+Zygote.gradient(loss ∘ unflatten, θ_flat_init)
 
 # L-BFGS parameters chosen because they seems to work well empirically.
 # You could also try with the defaults.
 optimisation_result = optimize(
     loss ∘ unflatten,
     θ -> only(Zygote.gradient(loss ∘ unflatten, θ)),
-    θ_flat_init + randn(length(θ_flat_init)),
+    θ_flat_init,
     LBFGS(;
         alphaguess=Optim.LineSearches.InitialStatic(; scaled=true),
         linesearch=Optim.LineSearches.BackTracking(),
@@ -98,6 +149,8 @@ optimisation_result = optimize(
     Optim.Options(; iterations=1_000);
     inplace=false,
 );
+
+
 θ_opt = unflatten(optimisation_result.minimizer);
 
 # 
@@ -119,3 +172,14 @@ let
     plot!(plt, x_pr, mean(p); color=:blue, linalpha=0.5, linewidth=2, label="")
     scatter!(plt, x_tr, y_tr; color=:red, label="")
 end
+
+
+## 
+u, lf = build_svgp(ParameterHandling.value(θ_opt))
+
+m, S, qω = aug_optimize(u, x_tr, y_tr)
+unew = SparseVariationalApproximation(Centered(), u.fz, MvNormal(m, S))
+##
+scatter(x_tr, y_tr, label="data", alpha=0.5)
+plot!(x_tr, f_tr, label="")
+plot!(posterior(unew)(x_tr))
