@@ -9,10 +9,11 @@ Y = rand(10, 20)
 Yc = ColVecs(Y)
 Yr = RowVecs(Y)
 Yv = collect.(eachcol(Y))
-suite = BenchmarkGroup()
+SUITE = BenchmarkGroup()
 
 kernels = Dict(
-    "SqExponential" => SqExponentialKernel()
+    "SqExponential" => SqExponentialKernel(),
+    "Exponential" => ExponentialKernel(),
 )
 
 inputtypes = Dict(
@@ -29,7 +30,7 @@ functions = Dict(
 )
 
 for (kname, kernel) in kernels
-    suite[kname] = sk = BenchmarkGroup()
+    SUITE[kname] = sk = BenchmarkGroup()
     for (inputname, (X, Y)) in inputtypes
         sk[inputname] = si = BenchmarkGroup()
         for (fname, f) in functions
@@ -38,7 +39,8 @@ for (kname, kernel) in kernels
     end
 end
 
-tune!(suite)
+# Uncomment the following to run benchmark locally
 
-results = run(suite, verbose=true)
-results[@tagged "kernelmatrixX"]
+# tune!(SUITE)
+
+# results = run(SUITE, verbose=true)
